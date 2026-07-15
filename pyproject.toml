@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "langchain-opedd"
-version = "0.1.0"
+version = "0.1.1"
 description = "LangChain integration for Opedd — licensed, rights-cleared content for AI: load your licensed corpus into RAG pipelines and give agents lookup/verify tools with a verifiable license key per article."
 readme = "README.md"
 license = { text = "MIT" }
