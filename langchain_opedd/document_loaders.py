@@ -62,7 +62,8 @@ class OpeddFeedLoader(BaseLoader):
             page: dict[str, Any] = self._client.feed.list(
                 since=self._since, cursor=cursor, limit=self._page_size
             )
-            articles = page.get("articles") or page.get("data", {}).get("articles") or []
+            data = page.get("data") or {}
+            articles = page.get("articles") or data.get("articles") or []
             for a in articles:
                 if self._max_documents is not None and yielded >= self._max_documents:
                     return
@@ -71,7 +72,7 @@ class OpeddFeedLoader(BaseLoader):
                     metadata={
                         "id": a.get("id"),
                         "title": a.get("title"),
-                        "source": a.get("source_url") or a.get("canonical_url"),
+                        "source": a.get("url") or a.get("source_url") or a.get("canonical_url"),
                         "publisher_id": a.get("publisher_id"),
                         "published_at": a.get("published_at"),
                         "author": a.get("author"),
@@ -83,7 +84,13 @@ class OpeddFeedLoader(BaseLoader):
                     },
                 )
                 yielded += 1
-            meta = page.get("_meta") or {}
-            cursor = meta.get("next_cursor")
-            if not cursor or not articles:
+            # The JSON feed returns the cursor at data.pagination.next_cursor
+            # (successResponse envelope). The prior `_meta.next_cursor` read
+            # exists ONLY in NDJSON mode → was always None → the loader
+            # silently stopped after page 1, loading ≤page_size documents of
+            # an arbitrarily large catalog. Guard against a non-advancing
+            # cursor to avoid an infinite loop if the server ever repeats one.
+            next_cursor = (data.get("pagination") or {}).get("next_cursor")
+            if not next_cursor or not articles or next_cursor == cursor:
                 return
+            cursor = next_cursor
