@@ -58,30 +58,36 @@ def test_content_tool_with_client() -> None:
 
 def test_feed_loader_pagination_and_metadata() -> None:
     c = MagicMock()
+    # Real JSON feed shape: successResponse envelope with the cursor at
+    # data.pagination.next_cursor (NOT _meta.next_cursor — that is NDJSON-only).
+    # articles use the `url` key (backend maps url: a.source_url).
     c.feed.list.side_effect = [
-        {"articles": [
-            {"id": "a1", "title": "T1", "content_body": "B1", "source_url": "https://s/1",
+        {"data": {"articles": [
+            {"id": "a1", "title": "T1", "content_body": "B1", "url": "https://s/1",
              "publisher_id": "p1", "published_at": "2026-01-01", "author": "A"},
-        ], "_meta": {"next_cursor": "c2"}},
-        {"articles": [
-            {"id": "a2", "title": "T2", "content_body": "B2", "source_url": "https://s/2",
+        ], "pagination": {"next_cursor": "c2"}}},
+        {"data": {"articles": [
+            {"id": "a2", "title": "T2", "content_body": "B2", "url": "https://s/2",
              "publisher_id": "p1", "published_at": "2026-01-02", "author": "A"},
-        ], "_meta": {}},
+        ], "pagination": {"next_cursor": None}}},
     ]
     docs = OpeddFeedLoader(access_key="ent_x", client=c).load()
-    assert len(docs) == 2
+    assert len(docs) == 2  # pagination MUST cross both pages (H1 regression)
     assert isinstance(docs[0], Document)
     assert docs[0].page_content == "B1"
     assert docs[0].metadata["licensed"] is True
     assert docs[0].metadata["provider"] == "opedd"
+    assert docs[0].metadata["source"] == "https://s/1"  # url key resolves (M3)
     assert docs[1].metadata["id"] == "a2"
 
 
 def test_feed_loader_max_documents() -> None:
     c = MagicMock()
     c.feed.list.return_value = {
-        "articles": [{"id": f"a{i}", "content_body": "b"} for i in range(5)],
-        "_meta": {"next_cursor": None},
+        "data": {
+            "articles": [{"id": f"a{i}", "content_body": "b"} for i in range(5)],
+            "pagination": {"next_cursor": None},
+        },
     }
     docs = OpeddFeedLoader(access_key="ent_x", client=c, max_documents=3).load()
     assert len(docs) == 3

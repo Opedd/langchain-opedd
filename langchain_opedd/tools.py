@@ -14,7 +14,7 @@ from typing import Any, Optional, Type
 from langchain_core.tools import BaseTool
 from pydantic import BaseModel, Field, PrivateAttr
 
-from opedd import Opedd
+from opedd import Opedd, OpeddNotFoundError
 
 
 def _dumps(data: Any) -> str:
@@ -48,7 +48,13 @@ class OpeddLookupTool(BaseTool):
         self._client = client or Opedd(buyer_token=_PUBLIC_PLACEHOLDER, base_url=base_url)
 
     def _run(self, url: str) -> str:
-        return _dumps(self._client.discovery.lookup_article(url=url))
+        # "Not licensable via Opedd" is a normal negative answer for an agent,
+        # not an error — return structured JSON so the agent can reason about
+        # it instead of the tool raising and looking broken.
+        try:
+            return _dumps(self._client.discovery.lookup_article(url=url))
+        except OpeddNotFoundError:
+            return _dumps({"found": False, "url": url, "licensable": False})
 
 
 class _DirectoryInput(BaseModel):
@@ -95,7 +101,11 @@ class OpeddVerifyLicenseTool(BaseTool):
         self._client = client or Opedd(buyer_token=_PUBLIC_PLACEHOLDER, base_url=base_url)
 
     def _run(self, key: str) -> str:
-        return _dumps(self._client.discovery.verify_license(key=key))
+        # An unknown/invalid key is a normal negative answer, not an error.
+        try:
+            return _dumps(self._client.discovery.verify_license(key=key))
+        except OpeddNotFoundError:
+            return _dumps({"found": False, "key": key, "valid": False})
 
 
 class _ContentInput(BaseModel):
