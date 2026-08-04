@@ -48,7 +48,7 @@ tools = [
 
 - **No key needed** for discovery/verification tools.
 - **Buyer token** (`opedd_buyer_live_*`): self-serve signup at [opedd.com](https://opedd.com) — no approval step.
-- **Enterprise access key** (`ent_*`): issued with an enterprise license (bulk/metered catalog access).
+- **Enterprise access key** (`ent_*`): issued with an enterprise license. Flat-fee scopes (`custom`/`platform_wide`) get the full-text bulk feed; **metered (filtered-scope) keys get a discovery-only feed** — `content_body` is empty and article text is fetched per call via the content API (billed per retrieval). The loader raises on metered keys unless you pass `allow_discovery_only=True` (metadata-only Documents).
 
 ## Autonomous purchasing
 

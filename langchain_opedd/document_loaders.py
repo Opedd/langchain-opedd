@@ -49,11 +49,21 @@ class OpeddFeedLoader(BaseLoader):
         max_documents: Optional[int] = None,
         base_url: Optional[str] = None,
         client: Optional[Opedd] = None,
+        allow_discovery_only: bool = False,
     ) -> None:
         self._client = client or Opedd(access_key=access_key, base_url=base_url)
         self._since = since
         self._page_size = min(page_size, 200)
         self._max_documents = max_documents
+        # Metered-feed contract (backend change 2026-07-31): filtered-scope
+        # (metered) ent_* keys get a DISCOVERY-ONLY feed — content_body is
+        # None and each article carries content_access="metered_per_call";
+        # article text is fetched via /content-delivery and billed per call.
+        # Loading such a feed into a vectorstore silently embeds empty
+        # strings, so by default the loader raises with instructions.
+        # Pass allow_discovery_only=True to opt into metadata-only Documents
+        # (empty page_content) for catalog/discovery workflows.
+        self._allow_discovery_only = allow_discovery_only
 
     def lazy_load(self) -> Iterator[Document]:
         cursor: Optional[str] = None
@@ -67,6 +77,19 @@ class OpeddFeedLoader(BaseLoader):
             for a in articles:
                 if self._max_documents is not None and yielded >= self._max_documents:
                     return
+                if (
+                    a.get("content_access") == "metered_per_call"
+                    and not self._allow_discovery_only
+                ):
+                    raise ValueError(
+                        "This access key is metered (filtered scope): the feed is "
+                        "discovery-only and carries no article text "
+                        "(content_access='metered_per_call'), so loading it into a "
+                        "vectorstore would embed empty documents. Fetch article "
+                        "text via the per-call content API (client.content.get, "
+                        "billed per retrieval), or pass allow_discovery_only=True "
+                        "to load metadata-only Documents."
+                    )
                 yield Document(
                     page_content=a.get("content_body") or a.get("content") or "",
                     metadata={

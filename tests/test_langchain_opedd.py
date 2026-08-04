@@ -91,3 +91,39 @@ def test_feed_loader_max_documents() -> None:
     }
     docs = OpeddFeedLoader(access_key="ent_x", client=c, max_documents=3).load()
     assert len(docs) == 3
+
+
+def test_feed_loader_metered_key_raises_by_default() -> None:
+    """Metered-feed contract (2026-07-31): filtered-scope keys carry
+    content_access='metered_per_call' + null content_body — loading them
+    into a vectorstore would silently embed empty strings, so we raise."""
+    c = MagicMock()
+    c.feed.list.return_value = {
+        "data": {
+            "articles": [
+                {"id": "a1", "content_body": None, "content_access": "metered_per_call"},
+            ],
+            "pagination": {"next_cursor": None},
+        },
+    }
+    try:
+        OpeddFeedLoader(access_key="ent_filtered_x", client=c).load()
+        raise AssertionError("metered feed must raise without allow_discovery_only")
+    except ValueError as e:
+        assert "metered" in str(e)
+
+
+def test_feed_loader_metered_key_discovery_only_opt_in() -> None:
+    c = MagicMock()
+    c.feed.list.return_value = {
+        "data": {
+            "articles": [
+                {"id": "a1", "title": "T", "content_body": None, "content_access": "metered_per_call"},
+            ],
+            "pagination": {"next_cursor": None},
+        },
+    }
+    docs = OpeddFeedLoader(access_key="ent_filtered_x", client=c, allow_discovery_only=True).load()
+    assert len(docs) == 1
+    assert docs[0].page_content == ""
+    assert docs[0].metadata["title"] == "T"
