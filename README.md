@@ -48,7 +48,16 @@ tools = [
 
 - **No key needed** for discovery/verification tools.
 - **Buyer token** (`opedd_buyer_live_*`): self-serve signup at [opedd.com](https://opedd.com) — no approval step.
-- **Enterprise access key** (`ent_*`): issued with an enterprise license. Flat-fee scopes (`custom`/`platform_wide`) get the full-text bulk feed; **metered (filtered-scope) keys get a discovery-only feed** — `content_body` is empty and article text is fetched per call via the content API (billed per retrieval). The loader raises on metered keys unless you pass `allow_discovery_only=True` (metadata-only Documents).
+- **Enterprise access key** (`ent_*`): issued with an order. What the loader does depends on the licence:
+  - **AI training** and **Full catalogue** orders: the feed carries the full text; nothing else is needed.
+  - **Monthly AI answers** and **client display**: the feed lists articles without their text, and the loader fetches each article's text from the content API. Pass `buyer_email` (the email on the order) so the loader can exchange your access key for a bearer token, or pass `buyer_token` if you already have one.
+  - **Pay per request** (metered): the same, but every fetch is billed and returns a snippet (up to 300 words or 25% of the article).
+
+  Pass `allow_discovery_only=True` to load metadata-only Documents and fetch nothing. Articles the content API will not serve (revoked, withdrawn by the publisher) are skipped.
+
+```python
+loader = OpeddFeedLoader(access_key="ent_...", buyer_email="you@company.com")
+```
 
 ## Autonomous purchasing
 

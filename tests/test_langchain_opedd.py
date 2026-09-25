@@ -1,6 +1,9 @@
 """Unit tests — mocked Opedd client, no network."""
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
+
+import pytest
+from opedd import OpeddAuthError, OpeddError, OpeddNotFoundError
 
 from langchain_core.documents import Document
 
@@ -93,24 +96,94 @@ def test_feed_loader_max_documents() -> None:
     assert len(docs) == 3
 
 
-def test_feed_loader_metered_key_raises_by_default() -> None:
-    """Metered-feed contract (2026-07-31): filtered-scope keys carry
-    content_access='metered_per_call' + null content_body — loading them
-    into a vectorstore would silently embed empty strings, so we raise."""
+def _feed(*rows: dict) -> MagicMock:
     c = MagicMock()
-    c.feed.list.return_value = {
-        "data": {
-            "articles": [
-                {"id": "a1", "content_body": None, "content_access": "metered_per_call"},
-            ],
-            "pagination": {"next_cursor": None},
-        },
-    }
-    try:
-        OpeddFeedLoader(access_key="ent_filtered_x", client=c).load()
-        raise AssertionError("metered feed must raise without allow_discovery_only")
-    except ValueError as e:
-        assert "metered" in str(e)
+    c.buyer_token = None
+    c.feed.list.return_value = {"data": {"articles": list(rows), "pagination": {"next_cursor": None}}}
+    return c
+
+
+def test_feed_loader_included_uses_content_body_without_fetching() -> None:
+    """content_access='included' (AI training / Full catalogue): text is in the feed."""
+    c = _feed({"id": "a1", "content_body": "Full text", "content_access": "included", "license_id": "L1"})
+    docs = OpeddFeedLoader(access_key="ent_x", client=c).load()
+    assert [d.page_content for d in docs] == ["Full text"]
+    assert docs[0].metadata["content_access"] == "included"
+    assert docs[0].metadata["license_id"] == "L1"
+    c.content.get.assert_not_called()
+
+
+def test_feed_loader_retrieval_per_article_fetches_each_article() -> None:
+    """Monthly AI answers feed: discovery-only rows; text via /content-delivery.
+    Before 0.1.3 these loaded as empty Documents."""
+    c = _feed(
+        {"id": "a1", "title": "T1", "content_body": None, "content_access": "retrieval_per_article"},
+        {"id": "a2", "title": "T2", "content_body": None, "content_access": "retrieval_per_article"},
+    )
+    c.buyer_token = "opedd_buyer_live_x"
+    # Real /content-delivery payload shape (content.get unwraps data): the text is `content`.
+    c.content.get.side_effect = lambda aid: {"article_id": aid, "content": f"text of {aid}", "content_available": True}
+    docs = OpeddFeedLoader(access_key="ent_x", client=c).load()
+    assert [d.page_content for d in docs] == ["text of a1", "text of a2"]
+    assert [call.args[0] for call in c.content.get.call_args_list] == ["a1", "a2"]
+    assert docs[0].metadata["content_access"] == "retrieval_per_article"
+
+
+def test_feed_loader_metered_fetches_per_call() -> None:
+    c = _feed({"id": "a1", "content_body": None, "content_access": "metered_per_call"})
+    c.buyer_token = "opedd_buyer_live_x"
+    c.content.get.return_value = {"article_id": "a1", "content": "snippet"}
+    docs = OpeddFeedLoader(access_key="ent_x", client=c).load()
+    assert [d.page_content for d in docs] == ["snippet"]
+
+
+def test_feed_loader_without_token_raises_with_instructions() -> None:
+    """No bearer token and no buyer_email: refuse rather than embed empty text."""
+    for access in ("retrieval_per_article", "metered_per_call"):
+        c = _feed({"id": "a1", "content_body": None, "content_access": access})
+        with pytest.raises(ValueError, match="buyer_email"):
+            OpeddFeedLoader(access_key="ent_x", client=c).load()
+        c.content.get.assert_not_called()
+
+
+def test_feed_loader_buyer_email_exchanges_access_key() -> None:
+    c = _feed({"id": "a1", "content_body": None, "content_access": "retrieval_per_article"})
+    content_client = MagicMock()
+    content_client.content.get.return_value = {"content": "text"}
+    with patch("langchain_opedd.document_loaders.Opedd.from_access_key", return_value=content_client) as exch:
+        docs = OpeddFeedLoader(access_key="ent_x", client=c, buyer_email="buyer@example.com").load()
+    exch.assert_called_once_with(access_key="ent_x", buyer_email="buyer@example.com", base_url=None)
+    assert [d.page_content for d in docs] == ["text"]
+
+
+def _err(cls: type, status: int, body: dict) -> Exception:
+    return cls("x", status_code=status, body=body)
+
+
+def test_feed_loader_skips_articles_it_may_not_embed() -> None:
+    """404 (not found / before the subscription began), 410 CONTENT_REVOKED,
+    403 ARTICLE_EXCLUDED and content=None are skipped; loading continues."""
+    rows = [{"id": f"a{i}", "content_body": None, "content_access": "retrieval_per_article"} for i in range(5)]
+    c = _feed(*rows)
+    c.buyer_token = "opedd_buyer_live_x"
+    c.content.get.side_effect = [
+        _err(OpeddNotFoundError, 404, {"success": False, "error": {"code": "NOT_FOUND", "message": "m"}}),
+        _err(OpeddError, 410, {"success": False, "code": "CONTENT_REVOKED"}),
+        _err(OpeddAuthError, 403, {"success": False, "error": {"code": "ARTICLE_EXCLUDED", "message": "m"}}),
+        {"content": None, "content_available": False},
+        {"content": "kept"},
+    ]
+    docs = OpeddFeedLoader(access_key="ent_x", client=c).load()
+    assert [d.page_content for d in docs] == ["kept"]
+    assert docs[0].metadata["id"] == "a4"
+
+
+def test_feed_loader_raises_on_other_auth_failures() -> None:
+    c = _feed({"id": "a1", "content_body": None, "content_access": "retrieval_per_article"})
+    c.buyer_token = "opedd_buyer_live_x"
+    c.content.get.side_effect = _err(OpeddAuthError, 401, {"success": False, "error": {"code": "UNAUTHORIZED", "message": "m"}})
+    with pytest.raises(OpeddAuthError):
+        OpeddFeedLoader(access_key="ent_x", client=c).load()
 
 
 def test_feed_loader_metered_key_discovery_only_opt_in() -> None:
@@ -126,4 +199,5 @@ def test_feed_loader_metered_key_discovery_only_opt_in() -> None:
     docs = OpeddFeedLoader(access_key="ent_filtered_x", client=c, allow_discovery_only=True).load()
     assert len(docs) == 1
     assert docs[0].page_content == ""
+    c.content.get.assert_not_called()
     assert docs[0].metadata["title"] == "T"
