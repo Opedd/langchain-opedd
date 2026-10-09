@@ -22,11 +22,19 @@ from opedd import Opedd, OpeddAuthError, OpeddError, OpeddNotFoundError
 #   "retrieval_per_article" monthly AI answers / client display: the feed is
 #                           discovery-only; the text comes one article at a
 #                           time from GET /content-delivery
-#   "metered_per_call"      pay per request: discovery-only; /content-delivery
-#                           returns a snippet and each call is billed
+#   "search_only"           pay per answer: no text in the feed, and
+#                           /content-delivery refuses these licences
+#                           (403 SEARCH_ONLY_LICENCE); the content is read by
+#                           asking questions (POST /search). Named
+#                           "metered_per_call" before feed schema
+#                           self-serve-2026-10.
 # Before 0.1.3 only "metered_per_call" was recognised, so a monthly AI answers
 # feed loaded as Documents with empty page_content.
-FETCHED_ACCESS = ("retrieval_per_article", "metered_per_call")
+FETCHED_ACCESS = ("retrieval_per_article",)
+# Rows whose text cannot be loaded at all: skipped (a Document with empty
+# page_content is the bug 0.1.3 fixed), or kept as metadata-only Documents
+# when allow_discovery_only=True.
+SEARCH_ONLY_ACCESS = ("search_only", "metered_per_call")
 
 # /content-delivery answers that mean "this article is not yours to embed",
 # not "something is broken": skip the article, keep loading.
@@ -113,9 +121,9 @@ class OpeddFeedLoader(BaseLoader):
         self._since = since
         self._page_size = min(page_size, 200)
         self._max_documents = max_documents
-        # Feeds without text (content_access retrieval_per_article /
-        # metered_per_call): by default the loader fetches each article's
-        # text via /content-delivery; allow_discovery_only=True opts into
+        # Feeds without text: retrieval_per_article rows are fetched one by
+        # one via /content-delivery; search_only rows (pay per answer) cannot
+        # be loaded and are skipped. allow_discovery_only=True keeps both as
         # metadata-only Documents instead (catalogue/discovery workflows).
         self._allow_discovery_only = allow_discovery_only
 
@@ -133,6 +141,8 @@ class OpeddFeedLoader(BaseLoader):
                     return
                 access = a.get("content_access")
                 text: Optional[str]
+                if access in SEARCH_ONLY_ACCESS and not self._allow_discovery_only:
+                    continue
                 if access in FETCHED_ACCESS and not self._allow_discovery_only:
                     text = self._fetch_text(a)
                     if not text:

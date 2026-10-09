@@ -2,6 +2,15 @@
 
 All notable changes to langchain-opedd are documented in this file.
 
+
+## Unreleased
+
+- `OpeddFeedLoader` skips pay-per-answer rows (`content_access: "search_only"`,
+  formerly `"metered_per_call"`): their text is read by asking questions
+  (`POST /search`), and fetching the article answers
+  `403 SEARCH_ONLY_LICENCE`. Previously the loader fetched a snippet per row.
+  `allow_discovery_only=True` still keeps them as metadata-only Documents.
+
 ## [0.1.3] — 2026-09-25
 
 ### Fixed
