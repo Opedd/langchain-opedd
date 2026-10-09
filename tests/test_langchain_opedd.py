@@ -129,21 +129,25 @@ def test_feed_loader_retrieval_per_article_fetches_each_article() -> None:
     assert docs[0].metadata["content_access"] == "retrieval_per_article"
 
 
-def test_feed_loader_metered_fetches_per_call() -> None:
-    c = _feed({"id": "a1", "content_body": None, "content_access": "metered_per_call"})
-    c.buyer_token = "opedd_buyer_live_x"
-    c.content.get.return_value = {"article_id": "a1", "content": "snippet"}
-    docs = OpeddFeedLoader(access_key="ent_x", client=c).load()
-    assert [d.page_content for d in docs] == ["snippet"]
+def test_feed_loader_skips_search_only_rows() -> None:
+    """Pay per answer (search_only, formerly metered_per_call): the article
+    cannot be fetched (403 SEARCH_ONLY_LICENCE) and an empty Document is the
+    bug 0.1.3 fixed, so the row is skipped without any fetch."""
+    for access in ("search_only", "metered_per_call"):
+        c = _feed({"id": "a1", "content_body": None, "content_access": access},
+                  {"id": "a2", "content_body": "Full text", "content_access": "included"})
+        c.buyer_token = "opedd_buyer_live_x"
+        docs = OpeddFeedLoader(access_key="ent_x", client=c).load()
+        assert [d.page_content for d in docs] == ["Full text"]
+        c.content.get.assert_not_called()
 
 
 def test_feed_loader_without_token_raises_with_instructions() -> None:
     """No bearer token and no buyer_email: refuse rather than embed empty text."""
-    for access in ("retrieval_per_article", "metered_per_call"):
-        c = _feed({"id": "a1", "content_body": None, "content_access": access})
-        with pytest.raises(ValueError, match="buyer_email"):
-            OpeddFeedLoader(access_key="ent_x", client=c).load()
-        c.content.get.assert_not_called()
+    c = _feed({"id": "a1", "content_body": None, "content_access": "retrieval_per_article"})
+    with pytest.raises(ValueError, match="buyer_email"):
+        OpeddFeedLoader(access_key="ent_x", client=c).load()
+    c.content.get.assert_not_called()
 
 
 def test_feed_loader_buyer_email_exchanges_access_key() -> None:
@@ -191,7 +195,7 @@ def test_feed_loader_metered_key_discovery_only_opt_in() -> None:
     c.feed.list.return_value = {
         "data": {
             "articles": [
-                {"id": "a1", "title": "T", "content_body": None, "content_access": "metered_per_call"},
+                {"id": "a1", "title": "T", "content_body": None, "content_access": "search_only"},
             ],
             "pagination": {"next_cursor": None},
         },
