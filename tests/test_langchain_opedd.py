@@ -3,7 +3,7 @@
 from unittest.mock import MagicMock, patch
 
 import pytest
-from opedd import OpeddAuthError, OpeddError, OpeddNotFoundError
+from opedd import OpeddAuthError, OpeddError, OpeddNotFoundError, OpeddRateLimitError
 
 from langchain_core.documents import Document
 
@@ -104,7 +104,7 @@ def _feed(*rows: dict) -> MagicMock:
 
 
 def test_feed_loader_included_uses_content_body_without_fetching() -> None:
-    """content_access='included' (AI training / Full catalogue): text is in the feed."""
+    """content_access="included" (Full download + training): text is in the feed."""
     c = _feed({"id": "a1", "content_body": "Full text", "content_access": "included", "license_id": "L1"})
     docs = OpeddFeedLoader(access_key="ent_x", client=c).load()
     assert [d.page_content for d in docs] == ["Full text"]
@@ -114,7 +114,7 @@ def test_feed_loader_included_uses_content_body_without_fetching() -> None:
 
 
 def test_feed_loader_retrieval_per_article_fetches_each_article() -> None:
-    """Monthly AI answers feed: discovery-only rows; text via /content-delivery.
+    """Subscription feed: discovery-only rows; text via /content-delivery.
     Before 0.1.3 these loaded as empty Documents."""
     c = _feed(
         {"id": "a1", "title": "T1", "content_body": None, "content_access": "retrieval_per_article"},
@@ -205,3 +205,48 @@ def test_feed_loader_metered_key_discovery_only_opt_in() -> None:
     assert docs[0].page_content == ""
     c.content.get.assert_not_called()
     assert docs[0].metadata["title"] == "T"
+
+
+def _limit_error(code: str) -> OpeddRateLimitError:
+    # The real 429 body (opedd-backend _shared/rate-limit.ts rateLimitResponse):
+    # the message in `error`, the code beside it.
+    return OpeddRateLimitError(
+        "Daily reading limit reached: you have read 20 full articles today under this subscription.",
+        retry_after_seconds=3600,
+        status_code=429,
+        body={"success": False, "error": "Daily reading limit reached", "code": code, "retry_after": 3600},
+    )
+
+
+def test_feed_loader_stops_cleanly_at_the_daily_reading_limit() -> None:
+    """A subscription's daily limit ends today's load: what was read is kept,
+    the loader warns and says so, and nothing further is fetched."""
+    c = _feed(
+        {"id": "a1", "title": "T1", "content_body": None, "content_access": "retrieval_per_article"},
+        {"id": "a2", "title": "T2", "content_body": None, "content_access": "retrieval_per_article"},
+        {"id": "a3", "title": "T3", "content_body": None, "content_access": "retrieval_per_article"},
+    )
+    c.buyer_token = "opedd_buyer_live_x"
+
+    def get(aid: str) -> dict:
+        if aid == "a2":
+            raise _limit_error("DAILY_READING_LIMIT")
+        return {"article_id": aid, "content": f"text of {aid}"}
+
+    c.content.get.side_effect = get
+    loader = OpeddFeedLoader(access_key="ent_x", client=c)
+    with pytest.warns(UserWarning, match="Loading stopped after 1 documents"):
+        docs = loader.load()
+    assert [d.page_content for d in docs] == ["text of a1"]
+    assert loader.reading_limit_reached is True
+    assert [call.args[0] for call in c.content.get.call_args_list] == ["a1", "a2"]
+
+
+def test_feed_loader_other_rate_limits_still_raise() -> None:
+    c = _feed({"id": "a1", "title": "T1", "content_body": None, "content_access": "retrieval_per_article"})
+    c.buyer_token = "opedd_buyer_live_x"
+    c.content.get.side_effect = _limit_error("RATE_LIMITED")
+    loader = OpeddFeedLoader(access_key="ent_x", client=c)
+    with pytest.raises(OpeddRateLimitError):
+        loader.load()
+    assert loader.reading_limit_reached is False

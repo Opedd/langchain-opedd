@@ -3,8 +3,11 @@
 All notable changes to langchain-opedd are documented in this file.
 
 
-## Unreleased
+## [0.1.4] — 2026-11-12
 
+### Changed
+
+- Three licences (Opedd, 2026-11-12): Full download + training orders carry the text in the feed; subscriptions list articles and the loader fetches each one. A subscription has a daily reading limit (by default 20 full articles per person, 200 per order). When it is reached the loader now stops, keeps every Document already loaded, warns, and sets `reading_limit_reached`; previously the 429 ended `load()` with an exception and lost the Documents read so far. Other rate limits still raise.
 - `OpeddFeedLoader` skips pay-per-answer rows (`content_access: "search_only"`,
   formerly `"metered_per_call"`): their text is read by asking questions
   (`POST /search`), and fetching the article answers
