@@ -49,9 +49,9 @@ tools = [
 - **No key needed** for discovery/verification tools.
 - **Buyer token** (`opedd_buyer_live_*`): self-serve signup at [opedd.com](https://opedd.com) — no approval step.
 - **Enterprise access key** (`ent_*`): issued with an order. What the loader does depends on the licence:
-  - **AI training** and **Full catalogue** orders: the feed carries the full text; nothing else is needed.
-  - **Monthly AI answers** and **client display**: the feed lists articles without their text, and the loader fetches each article's text from the content API. Pass `buyer_email` (the email on the order) so the loader can exchange your access key for a bearer token, or pass `buyer_token` if you already have one.
-  - **Pay per request** (metered): the same, but every fetch is billed and returns a snippet (up to 300 words or 25% of the article).
+  - **Full download + training** orders: the feed carries the full text; nothing else is needed.
+  - **Subscriptions**: the feed lists articles without their text, and the loader fetches each article's text from the content API. Pass `buyer_email` (the email on the order) so the loader can exchange your access key for a bearer token, or pass `buyer_token` if you already have one. A subscription has a daily reading limit (by default 20 full articles per person, 200 per order); when it is reached the loader stops with a warning and sets `loader.reading_limit_reached`. Run it again after midnight UTC with `since=` to continue. Loading a whole catalogue at once is the Full download + training licence.
+  - **Pay per answer**: the feed has no text and the loader skips those rows; ask questions with `POST /search`.
 
   Pass `allow_discovery_only=True` to load metadata-only Documents and fetch nothing. Articles the content API will not serve (revoked, withdrawn by the publisher) are skipped.
 

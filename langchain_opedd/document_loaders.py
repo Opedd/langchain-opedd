@@ -7,21 +7,24 @@ carried on every Document's metadata.
 
 from __future__ import annotations
 
+import warnings
 from typing import Any, Iterator, Optional
 
 from langchain_core.document_loaders import BaseLoader
 from langchain_core.documents import Document
 
-from opedd import Opedd, OpeddAuthError, OpeddError, OpeddNotFoundError
+from opedd import Opedd, OpeddAuthError, OpeddError, OpeddNotFoundError, OpeddRateLimitError
 
 # How a feed row's text is obtained — the backend contract in opedd-backend
 # supabase/functions/enterprise-license/handlers/feed-contract.ts
 # (feedContentAccess):
-#   "included"              full text is in content_body (AI training and
-#                           Full catalogue one-off orders)
-#   "retrieval_per_article" monthly AI answers / client display: the feed is
-#                           discovery-only; the text comes one article at a
-#                           time from GET /content-delivery
+#   "included"              full text is in content_body (Full download +
+#                           training orders, and Full catalogue orders sold
+#                           before 2026-11-12)
+#   "retrieval_per_article" subscriptions: the feed is discovery-only; the
+#                           text comes one article at a time from GET
+#                           /content-delivery, within the subscription's daily
+#                           reading limit (429 DAILY_READING_LIMIT past it)
 #   "search_only"           pay per answer: no text in the feed, and
 #                           /content-delivery refuses these licences
 #                           (403 SEARCH_ONLY_LICENCE); the content is read by
@@ -38,10 +41,22 @@ SEARCH_ONLY_ACCESS = ("search_only", "metered_per_call")
 
 # /content-delivery answers that mean "this article is not yours to embed",
 # not "something is broken": skip the article, keep loading.
-#   404  not found, or published before a forward-only subscription began
+#   404  not found
 #   410  CONTENT_REVOKED — the publisher revoked it; copies must be deleted
 #   403  ARTICLE_EXCLUDED — the publisher stopped licensing it
 _SKIP_STATUSES = (404, 410)
+
+
+# A subscription reads the whole catalogue but cannot copy it (2026-11-12):
+# each person may read a set number of full articles a day. Reaching it is not
+# an error in the load, it is the end of today's load.
+_DAILY_READING_LIMIT = "DAILY_READING_LIMIT"
+
+
+class _ReadingLimitReached(Exception):
+    def __init__(self, err: OpeddError) -> None:
+        super().__init__(str(err))
+        self.err = err
 
 
 def _error_code(err: OpeddError) -> Optional[str]:
@@ -71,13 +86,18 @@ class OpeddFeedLoader(BaseLoader):
     Where the article text comes from depends on the licence you bought
     (each feed row says so in ``content_access``):
 
-    - AI training and Full catalogue orders: the text is in the feed.
-    - Monthly AI answers and client display: the feed lists the articles and
-      the loader fetches each one's text from the content API. This needs a
-      bearer token: pass ``buyer_email`` (the address on the order; the
-      loader exchanges your access key for a token) or ``buyer_token``.
-    - Pay per request (metered): same, but each fetch is billed and returns
-      a snippet (up to 300 words or 25% of the article), not the full text.
+    - Full download + training orders: the text is in the feed.
+    - Subscriptions: the feed lists the articles and the loader fetches each
+      one's text from the content API. This needs a bearer token: pass
+      ``buyer_email`` (the address on the order; the loader exchanges your
+      access key for a token) or ``buyer_token``. A subscription has a daily
+      reading limit (by default 20 full articles per person and 200 per
+      order); when it is reached the loader stops, warns, and sets
+      ``reading_limit_reached``. Run it again after midnight UTC, with
+      ``since`` to continue. Loading a whole catalogue at once is the Full
+      download + training licence.
+    - Pay per answer: no text in the feed and none to fetch; those rows are
+      skipped (ask questions with ``POST /search`` instead).
 
     Articles the content API will not serve (revoked, withdrawn by the
     publisher, not found) are skipped. Documents with no text are never
@@ -126,6 +146,8 @@ class OpeddFeedLoader(BaseLoader):
         # be loaded and are skipped. allow_discovery_only=True keeps both as
         # metadata-only Documents instead (catalogue/discovery workflows).
         self._allow_discovery_only = allow_discovery_only
+        # True once a subscription's daily reading limit stopped a load.
+        self.reading_limit_reached = False
 
     def lazy_load(self) -> Iterator[Document]:
         cursor: Optional[str] = None
@@ -144,7 +166,16 @@ class OpeddFeedLoader(BaseLoader):
                 if access in SEARCH_ONLY_ACCESS and not self._allow_discovery_only:
                     continue
                 if access in FETCHED_ACCESS and not self._allow_discovery_only:
-                    text = self._fetch_text(a)
+                    try:
+                        text = self._fetch_text(a)
+                    except _ReadingLimitReached as stop:
+                        self.reading_limit_reached = True
+                        warnings.warn(
+                            f"Opedd: {stop.err} Loading stopped after {yielded} documents; "
+                            "run the loader again after the reset (pass since= to continue).",
+                            stacklevel=2,
+                        )
+                        return
                     if not text:
                         continue
                 else:
@@ -213,6 +244,10 @@ class OpeddFeedLoader(BaseLoader):
             got = self._content().content.get(article_id)
         except OpeddNotFoundError:
             return None
+        except OpeddRateLimitError as err:
+            if _error_code(err) == _DAILY_READING_LIMIT:
+                raise _ReadingLimitReached(err) from err
+            raise
         except OpeddAuthError as err:
             if _error_code(err) == "ARTICLE_EXCLUDED":
                 return None
